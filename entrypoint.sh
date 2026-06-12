@@ -99,11 +99,14 @@ fi
 # Precedence: a real domain (CLOUDFLARE_DOMAIN above) always wins.
 if [ -f /data/config.toml ] && [ -z "$CLOUDFLARE_DOMAIN" ]; then
   if [ -f /etc/pubky-cloudflare/testdrive.env ]; then
+    # The logfile appends across restarts, so it still contains the PREVIOUS
+    # boot's (now dead) URL. Record the size at our start and only accept a
+    # URL appended after that offset - that is this boot's fresh one.
+    LOG=/etc/pubky-cloudflare/preview/quick.log
+    OFFSET=$(stat -c %s "$LOG" 2>/dev/null || echo 0)
     PREVIEW_URL=""
-    for i in $(seq 1 30); do
-      # tail -1: the logfile appends across container restarts; the last
-      # non-API trycloudflare URL is the current one.
-      PREVIEW_URL=$(grep -oE 'https://[a-z0-9-]+\.trycloudflare\.com' /etc/pubky-cloudflare/preview/quick.log 2>/dev/null | grep -v '^https://api\.' | tail -1)
+    for i in $(seq 1 45); do
+      PREVIEW_URL=$(tail -c +$((OFFSET + 1)) "$LOG" 2>/dev/null | grep -oE 'https://[a-z0-9-]+\.trycloudflare\.com' | grep -v '^https://api\.' | tail -1)
       [ -n "$PREVIEW_URL" ] && break
       sleep 1
     done
