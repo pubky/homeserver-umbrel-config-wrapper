@@ -20,7 +20,7 @@ enabled = true
 listen_socket = "0.0.0.0:6289"
 
 [pkdns]
-public_ip = "${DETECTED_PUBLIC_IP}"
+${PUBLIC_IP_LINE}
 icann_domain = "${DETECTED_ICANN_DOMAIN}"
 user_keys_republisher_interval = 14400
 dht_relay_nodes = ["https://pkarr.pubky.app", "https://pkarr.pubky.org"]
