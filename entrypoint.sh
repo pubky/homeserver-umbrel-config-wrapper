@@ -109,6 +109,11 @@ if [ -f "$CF_DIR/domain" ] && [ -s "$CF_DIR/domain" ]; then
   else
     echo "WARNING: domain configured but no tunnel mode is set up (no token, no config.yml); not publishing" >&2
     CLOUDFLARE_DOMAIN=""
+    # Stale/hand-edited state: the domain file outlived its tunnel mode (e.g.
+    # an upgrade where the token was later removed). Flag it so the reset below
+    # can drop a previously-published icann_domain from config.toml; otherwise
+    # the homeserver keeps serving the old domain this warning claims we dropped.
+    DOMAIN_GATE_REJECTED=1
   fi
 fi
 
@@ -332,6 +337,16 @@ if [ -f "$CONFIG" ] && [ -z "$CLOUDFLARE_DOMAIN" ]; then
     # Preview was disabled: reset the stale random domain so the published
     # record stops pointing at a dead URL.
     echo "Preview mode disabled: resetting stale trycloudflare icann_domain to localhost"
+    sed -i 's|^icann_domain[[:space:]]*=.*|icann_domain = "localhost"|' "$CONFIG"
+    sed -i '/^public_icann_http_port[[:space:]]*=/d' "$CONFIG"
+    chown homeserver:homeserver "$CONFIG" 2>/dev/null || true
+  elif [ -n "${DOMAIN_GATE_REJECTED:-}" ] &&
+    grep -q '^icann_domain[[:space:]]*=' "$CONFIG" &&
+    ! grep -q '^icann_domain[[:space:]]*=[[:space:]]*"localhost"' "$CONFIG"; then
+    # The domain file outlived its tunnel mode (publish gate above rejected it)
+    # and config.toml still carries a previously-published real domain. Reset it
+    # to localhost so the homeserver stops publishing a domain no tunnel serves.
+    echo "Ungated domain: resetting stale icann_domain to localhost (not publishing)"
     sed -i 's|^icann_domain[[:space:]]*=.*|icann_domain = "localhost"|' "$CONFIG"
     sed -i '/^public_icann_http_port[[:space:]]*=/d' "$CONFIG"
     chown homeserver:homeserver "$CONFIG" 2>/dev/null || true

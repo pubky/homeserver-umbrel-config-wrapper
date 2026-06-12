@@ -392,6 +392,27 @@ if [ "$(id -u)" = "0" ]; then
 fi
 finish "preview quick.log heal"
 
+echo "Scenario 18: ungated domain resets a stale real icann_domain to localhost"
+new_env s18
+# Upgrade case: a previously valid Cloudflare setup published example.com, then
+# the token was removed. config.toml still carries the old domain; the publish
+# gate now rejects it and must reset config.toml so the homeserver stops
+# serving a domain no tunnel backs.
+cat > "$CONFIG" <<'EOF'
+[pkdns]
+icann_domain = "example.com"
+public_icann_http_port = 443
+EOF
+printf 'example.com\n' > "$CF/domain"
+touch "$CF/token" # zero-byte token: no tunnel mode
+run_entry
+assert "exit 0" test "$RC" -eq 0
+assert "warning says not publishing" grep -q 'not publishing' "$ENVDIR/stderr.log"
+assert "stale real domain reset to localhost" grep -q '^icann_domain = "localhost"' "$CONFIG"
+assert_not "old domain no longer published" grep -q 'example.com' "$CONFIG"
+assert_not "stale port line removed" grep -q '^public_icann_http_port = ' "$CONFIG"
+finish "ungated domain resets stale real icann_domain"
+
 echo ""
 echo "==== Summary ====$SUMMARY"
 echo ""
