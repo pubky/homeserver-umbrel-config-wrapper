@@ -44,13 +44,15 @@ new_env() {
   SCEN_OK=1
 }
 
-# run_entry [extra VAR=value ...]: runs entrypoint.sh with the scenario dirs
+# run_entry [extra VAR=value ...]: runs entrypoint.sh with the scenario dirs.
+# ENTRY_SH overrides the shell that runs the entrypoint (e.g. "busybox sh");
+# it is intentionally unquoted so a multi-word value splits.
 run_entry() {
   env -i PATH="$PATH" \
     DATA_DIR="$DATA" CLOUDFLARE_DIR="$CF" CONFIG_TEMPLATE="$TEMPLATE" \
     PREVIEW_WAIT_SECS=2 \
     POSTGRES_PASSWORD=pgsecret ADMIN_PASSWORD=adminsecret \
-    "$@" sh "$ENTRY" > "$ENVDIR/stdout.log" 2> "$ENVDIR/stderr.log"
+    "$@" ${ENTRY_SH:-sh} "$ENTRY" > "$ENVDIR/stdout.log" 2> "$ENVDIR/stderr.log"
   RC=$?
 }
 
@@ -232,6 +234,88 @@ assert "domain published" grep -q '^icann_domain = "example.org"' "$CONFIG"
 assert "quick.log removed (preview off)" test ! -e "$CF/preview/quick.log"
 assert "published handshake removed (preview off)" test ! -e "$CF/preview/published"
 finish "domain supersedes preview"
+
+echo "Scenario 9: admin_password drift is reconciled on boot"
+new_env s9
+run_entry
+assert "initial password baked" grep -q '^admin_password = "adminsecret"' "$CONFIG"
+# Drifted env, including sed/TOML metacharacters: & | \ " '
+TRICKY='a&b|c\d"e'\''f'
+EXPECTED='admin_password = "a&b|c\\d\"e'\''f"'
+run_entry ADMIN_PASSWORD="$TRICKY"
+assert "exit 0" test "$RC" -eq 0
+assert "reconcile logged" grep -q 'Reconciling admin_password' "$ENVDIR/stdout.log"
+assert "tricky password written TOML-escaped" grep -qF "$EXPECTED" "$CONFIG"
+assert "no leftover .tmp" test ! -e "$CONFIG.tmp"
+# Same env again: no rewrite
+run_entry ADMIN_PASSWORD="$TRICKY"
+assert_not "no reconcile when already current" grep -q 'Reconciling admin_password' "$ENVDIR/stdout.log"
+assert "password still present" grep -qF "$EXPECTED" "$CONFIG"
+finish "admin_password reconcile"
+
+echo "Scenario 10: template version stamp written at generation"
+new_env s10
+run_entry
+assert "exit 0" test "$RC" -eq 0
+assert "stamp present" grep -q '^# pubky-wrapper-template-version: 1$' "$CONFIG"
+assert_not "no migration ran on fresh config" grep -q 'Migrating config.toml' "$ENVDIR/stdout.log"
+finish "stamp at generation"
+
+echo "Scenario 11: stamp-absent old config migrates to v1 exactly once"
+new_env s11
+cat > "$CONFIG" <<'EOF'
+[admin]
+admin_password = "adminsecret"
+
+[pkdns]
+public_ip = "172.19.0.3"
+icann_domain = "localhost"
+EOF
+run_entry
+assert "exit 0" test "$RC" -eq 0
+assert "migration logged" grep -q 'Migrating config.toml from template version 0 to 1' "$ENVDIR/stdout.log"
+assert "stamp written" grep -q '^# pubky-wrapper-template-version: 1$' "$CONFIG"
+assert "docker-internal public_ip commented" grep -q '^# public_ip = "172.19.0.3"' "$CONFIG"
+assert_not "no active public_ip line" grep -q '^public_ip' "$CONFIG"
+assert "no leftover .tmp" test ! -e "$CONFIG.tmp"
+cp "$CONFIG" "$ENVDIR/after-first.toml"
+# Second boot: idempotent, nothing changes
+run_entry
+assert "exit 0 on second boot" test "$RC" -eq 0
+assert_not "migration not re-run" grep -q 'Migrating config.toml' "$ENVDIR/stdout.log"
+assert "config byte-identical on second boot" cmp -s "$ENVDIR/after-first.toml" "$CONFIG"
+assert "exactly one stamp line" test "$(grep -c '^# pubky-wrapper-template-version' "$CONFIG")" -eq 1
+finish "stamp-absent migration"
+
+echo "Scenario 12: whitespace-variant icann_domain still patched by domain flow"
+new_env s12
+cat > "$CONFIG" <<'EOF'
+# pubky-wrapper-template-version: 1
+[pkdns]
+icann_domain   =   "localhost"
+EOF
+printf 'space.example.com\n' > "$CF/domain"
+run_entry
+assert "exit 0" test "$RC" -eq 0
+assert "icann_domain patched despite extra whitespace" grep -q '^icann_domain = "space.example.com"' "$CONFIG"
+assert "port 443 added" grep -q '^public_icann_http_port = 443' "$CONFIG"
+finish "whitespace-tolerant patching"
+
+echo "Scenario 13: duplicate icann_domain lines deduped, first preserved"
+new_env s13
+cat > "$CONFIG" <<'EOF'
+# pubky-wrapper-template-version: 1
+[pkdns]
+icann_domain = "first.example.com"
+icann_domain = "second.example.com"
+EOF
+run_entry
+assert "exit 0" test "$RC" -eq 0
+assert "warning emitted" grep -q 'icann_domain lines' "$ENVDIR/stderr.log"
+assert "first kept active" grep -q '^icann_domain = "first.example.com"' "$CONFIG"
+assert "second commented" grep -q '^# icann_domain = "second.example.com"' "$CONFIG"
+assert "exactly one active icann_domain" test "$(grep -c '^icann_domain' "$CONFIG")" -eq 1
+finish "duplicate icann_domain dedupe"
 
 echo ""
 echo "==== Summary ====$SUMMARY"

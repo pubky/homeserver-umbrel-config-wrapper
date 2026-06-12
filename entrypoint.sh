@@ -10,6 +10,12 @@ PREVIEW_WAIT_SECS=${PREVIEW_WAIT_SECS:-45}
 CONFIG="$DATA_DIR/config.toml"
 PREVIEW_DIR="$CF_DIR/preview"
 
+# Version of the config template this wrapper ships. Stamped into config.toml
+# as a comment at generation; migrate_config below brings older files up to
+# date. Bump this when the template changes in a way existing installs must
+# pick up, and add a numbered step to migrate_config.
+TEMPLATE_VERSION=1
+
 # Epoch at script start: a preview URL whose log line is older than this
 # (minus a grace period) belongs to a previous boot and must not be
 # re-published.
@@ -46,6 +52,44 @@ newest_fresh_url() {
     [ -n "$_epoch" ] || continue
     [ "$_epoch" -ge "$_cutoff" ] && printf '%s\n' "$_url"
   done | tail -n 1
+}
+
+# Migration framework: config.toml is generated once and survives app
+# updates, so template changes never reach existing installs on their own.
+# The file carries a "# pubky-wrapper-template-version: N" stamp (absent
+# means 0); this runs the numbered steps from the stamped version up to
+# TEMPLATE_VERSION, then rewrites stamp + file atomically (tmp + mv).
+# To add a migration: bump TEMPLATE_VERSION and add a case branch.
+migrate_config() {
+  [ -f "$CONFIG" ] || return 0
+  _ver=$(sed -n 's/^# pubky-wrapper-template-version:[[:space:]]*\([0-9][0-9]*\).*/\1/p' "$CONFIG" | head -n 1)
+  [ -n "$_ver" ] || _ver=0
+  [ "$_ver" -ge "$TEMPLATE_VERSION" ] && return 0
+  echo "Migrating config.toml from template version $_ver to $TEMPLATE_VERSION"
+  cp "$CONFIG" "$CONFIG.tmp"
+  while [ "$_ver" -lt "$TEMPLATE_VERSION" ]; do
+    _ver=$((_ver + 1))
+    case "$_ver" in
+      1)
+        # v1: old installs auto-detected the docker-internal address into
+        # public_ip at first generation, publishing an unroutable IP to the
+        # DHT. Comment it out; the homeserver's built-in default takes over.
+        if grep -Eq '^public_ip[[:space:]]*=[[:space:]]*"(10\.|192\.168\.|172\.(1[6-9]|2[0-9]|3[01])\.)' "$CONFIG.tmp"; then
+          echo "Migration 1: commenting out docker-internal public_ip"
+          sed -i 's|^\(public_ip[[:space:]]*=\)|# \1|' "$CONFIG.tmp"
+        fi
+        ;;
+    esac
+  done
+  if grep -q '^# pubky-wrapper-template-version:' "$CONFIG.tmp"; then
+    sed -i "s|^# pubky-wrapper-template-version:.*|# pubky-wrapper-template-version: $_ver|" "$CONFIG.tmp"
+  else
+    { printf '# pubky-wrapper-template-version: %s\n' "$_ver"; cat "$CONFIG.tmp"; } > "$CONFIG.tmp.stamp"
+    mv "$CONFIG.tmp.stamp" "$CONFIG.tmp"
+  fi
+  chmod 644 "$CONFIG.tmp" 2>/dev/null || true
+  chown homeserver:homeserver "$CONFIG.tmp" 2>/dev/null || true
+  mv "$CONFIG.tmp" "$CONFIG"
 }
 
 # Ensure data directory exists
@@ -122,10 +166,14 @@ if [ ! -f "$CONFIG" ]; then
   export POSTGRES_PASSWORD ADMIN_PASSWORD PUBLIC_IP_LINE DETECTED_ICANN_DOMAIN
   # Render atomically (tmp + mv): an interrupted boot must never leave a
   # truncated config.toml that the once-only guard above treats as final.
-  envsubst < "$CONFIG_TEMPLATE" > "$CONFIG.tmp"
+  # The version stamp lets migrate_config upgrade this file in future builds.
+  {
+    printf '# pubky-wrapper-template-version: %s\n' "$TEMPLATE_VERSION"
+    envsubst < "$CONFIG_TEMPLATE"
+  } > "$CONFIG.tmp"
 
   if [ -n "$DETECTED_PUBLIC_ICANN_HTTP_PORT" ]; then
-    sed -i "/^icann_domain = /a public_icann_http_port = $DETECTED_PUBLIC_ICANN_HTTP_PORT" "$CONFIG.tmp"
+    sed -i "/^icann_domain[[:space:]]*=/a public_icann_http_port = $DETECTED_PUBLIC_ICANN_HTTP_PORT" "$CONFIG.tmp"
   fi
 
   chmod 644 "$CONFIG.tmp" 2>/dev/null || true
@@ -133,22 +181,66 @@ if [ ! -f "$CONFIG" ]; then
   mv "$CONFIG.tmp" "$CONFIG"
 fi
 
+# Bring pre-existing configs up to the current template version (no-op on a
+# freshly generated file, which is stamped with TEMPLATE_VERSION already).
+migrate_config
+
+# Duplicate-key guard: a past sed bug class could leave more than one
+# icann_domain line, and duplicate keys crash the homeserver's TOML parse.
+# Keep the first and comment out the rest.
+if [ -f "$CONFIG" ]; then
+  DUP_COUNT=$(grep -c '^icann_domain[[:space:]]*=' "$CONFIG" || true)
+  if [ "${DUP_COUNT:-0}" -gt 1 ]; then
+    echo "WARNING: $DUP_COUNT icann_domain lines in config.toml; keeping the first and commenting out the rest" >&2
+    awk '
+      /^icann_domain[[:space:]]*=/ { if (seen++) { print "# " $0; next } }
+      { print }
+    ' "$CONFIG" > "$CONFIG.tmp"
+    chmod 644 "$CONFIG.tmp" 2>/dev/null || true
+    chown homeserver:homeserver "$CONFIG.tmp" 2>/dev/null || true
+    mv "$CONFIG.tmp" "$CONFIG"
+  fi
+fi
+
+# admin_password reconcile: the value is baked at first generation and the
+# environment can drift afterwards (Umbrel regenerating APP_PASSWORD,
+# reinstall patterns), which 401s the dashboard with no repair path. Rewrite
+# the line from the current env on every boot. awk with a char loop (not
+# sed) because the password may contain replacement metacharacters
+# (&, \, |, quotes); the value is escaped per TOML basic-string rules.
+if [ -f "$CONFIG" ] && [ -n "$ADMIN_PASSWORD" ] && grep -q '^admin_password[[:space:]]*=' "$CONFIG"; then
+  ADMIN_PASSWORD="$ADMIN_PASSWORD" awk '
+    BEGIN {
+      v = ENVIRON["ADMIN_PASSWORD"]; out = ""
+      n = length(v)
+      for (i = 1; i <= n; i++) {
+        c = substr(v, i, 1)
+        if (c == "\\" || c == "\"") out = out "\\"
+        out = out c
+      }
+    }
+    /^admin_password[[:space:]]*=/ { print "admin_password = \"" out "\""; next }
+    { print }
+  ' "$CONFIG" > "$CONFIG.tmp"
+  if cmp -s "$CONFIG.tmp" "$CONFIG"; then
+    rm -f "$CONFIG.tmp"
+  else
+    echo "Reconciling admin_password with current environment"
+    chmod 644 "$CONFIG.tmp" 2>/dev/null || true
+    chown homeserver:homeserver "$CONFIG.tmp" 2>/dev/null || true
+    mv "$CONFIG.tmp" "$CONFIG"
+  fi
+fi
+
 # If config already exists and CLOUDFLARE_DOMAIN is set (e.g. from dashboard), update [pkdns]
 if [ -f "$CONFIG" ] && [ -n "$CLOUDFLARE_DOMAIN" ]; then
-  if grep -q '^icann_domain = ' "$CONFIG"; then
-    sed -i "s|^icann_domain = .*|icann_domain = \"$CLOUDFLARE_DOMAIN\"|" "$CONFIG"
+  if grep -q '^icann_domain[[:space:]]*=' "$CONFIG"; then
+    sed -i "s|^icann_domain[[:space:]]*=.*|icann_domain = \"$CLOUDFLARE_DOMAIN\"|" "$CONFIG"
   fi
-  if ! grep -q '^public_icann_http_port = ' "$CONFIG"; then
-    sed -i "/^icann_domain = /a public_icann_http_port = 443" "$CONFIG"
+  if ! grep -q '^public_icann_http_port[[:space:]]*=' "$CONFIG"; then
+    sed -i "/^icann_domain[[:space:]]*=/a public_icann_http_port = 443" "$CONFIG"
   else
-    sed -i 's/^public_icann_http_port = .*/public_icann_http_port = 443/' "$CONFIG"
-  fi
-  # One-time heal: old installs auto-detected the docker-internal address
-  # into public_ip at first generation. Comment it out so the install stops
-  # publishing an unroutable IP to the DHT (homeserver default takes over).
-  if grep -Eq '^public_ip = "(10\.|192\.168\.|172\.(1[6-9]|2[0-9]|3[01])\.)' "$CONFIG"; then
-    echo "Healing config: commenting out docker-internal public_ip left by an old install"
-    sed -i 's|^public_ip = |# public_ip = |' "$CONFIG"
+    sed -i 's|^public_icann_http_port[[:space:]]*=.*|public_icann_http_port = 443|' "$CONFIG"
   fi
   chown homeserver:homeserver "$CONFIG" 2>/dev/null || true
 fi
@@ -194,11 +286,11 @@ if [ -f "$CONFIG" ] && [ -z "$CLOUDFLARE_DOMAIN" ]; then
     if [ -n "$PREVIEW_URL" ]; then
       PREVIEW_DOMAIN="${PREVIEW_URL#https://}"
       echo "Preview mode: publishing $PREVIEW_DOMAIN as icann_domain"
-      sed -i "s|^icann_domain = .*|icann_domain = \"$PREVIEW_DOMAIN\"|" "$CONFIG"
-      if ! grep -q '^public_icann_http_port = ' "$CONFIG"; then
-        sed -i "/^icann_domain = /a public_icann_http_port = 443" "$CONFIG"
+      sed -i "s|^icann_domain[[:space:]]*=.*|icann_domain = \"$PREVIEW_DOMAIN\"|" "$CONFIG"
+      if ! grep -q '^public_icann_http_port[[:space:]]*=' "$CONFIG"; then
+        sed -i "/^icann_domain[[:space:]]*=/a public_icann_http_port = 443" "$CONFIG"
       else
-        sed -i 's/^public_icann_http_port = .*/public_icann_http_port = 443/' "$CONFIG"
+        sed -i 's|^public_icann_http_port[[:space:]]*=.*|public_icann_http_port = 443|' "$CONFIG"
       fi
       chown homeserver:homeserver "$CONFIG" 2>/dev/null || true
       # Handshake for the dashboard: the URL this boot actually published,
@@ -210,19 +302,19 @@ if [ -f "$CONFIG" ] && [ -z "$CLOUDFLARE_DOMAIN" ]; then
       echo "WARNING: preview mode enabled but no fresh quick-tunnel URL appeared within ${PREVIEW_WAIT_SECS}s" >&2
       # Never leave a dead previous-boot URL published.
       rm -f "$PREVIEW_DIR/published" 2>/dev/null || true
-      if grep -q '^icann_domain = ".*\.trycloudflare\.com"' "$CONFIG"; then
+      if grep -q '^icann_domain[[:space:]]*=[[:space:]]*".*\.trycloudflare\.com"' "$CONFIG"; then
         echo "WARNING: resetting stale trycloudflare icann_domain to localhost" >&2
-        sed -i 's|^icann_domain = .*|icann_domain = "localhost"|' "$CONFIG"
-        sed -i '/^public_icann_http_port = /d' "$CONFIG"
+        sed -i 's|^icann_domain[[:space:]]*=.*|icann_domain = "localhost"|' "$CONFIG"
+        sed -i '/^public_icann_http_port[[:space:]]*=/d' "$CONFIG"
         chown homeserver:homeserver "$CONFIG" 2>/dev/null || true
       fi
     fi
-  elif grep -q '^icann_domain = ".*\.trycloudflare\.com"' "$CONFIG"; then
+  elif grep -q '^icann_domain[[:space:]]*=[[:space:]]*".*\.trycloudflare\.com"' "$CONFIG"; then
     # Preview was disabled: reset the stale random domain so the published
     # record stops pointing at a dead URL.
     echo "Preview mode disabled: resetting stale trycloudflare icann_domain to localhost"
-    sed -i 's|^icann_domain = .*|icann_domain = "localhost"|' "$CONFIG"
-    sed -i '/^public_icann_http_port = /d' "$CONFIG"
+    sed -i 's|^icann_domain[[:space:]]*=.*|icann_domain = "localhost"|' "$CONFIG"
+    sed -i '/^public_icann_http_port[[:space:]]*=/d' "$CONFIG"
     chown homeserver:homeserver "$CONFIG" 2>/dev/null || true
   fi
 fi
