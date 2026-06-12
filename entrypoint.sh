@@ -77,6 +77,46 @@ if [ -f /data/config.toml ] && [ -n "$CLOUDFLARE_DOMAIN" ]; then
   chown homeserver:homeserver /data/config.toml 2>/dev/null || true
 fi
 
+# Preview mode (dashboard "Preview" feature): a Cloudflare Quick Tunnel whose
+# random *.trycloudflare.com URL is published as the homeserver's domain.
+# The cloudflared-preview compose service (gated on the same testdrive.env
+# file via env_file) starts before this wrapper and writes its log to
+# preview/quick.log; the assigned URL appears there within ~10s. Each app
+# restart yields a NEW random URL, so this runs on every start.
+# Precedence: a real domain (CLOUDFLARE_DOMAIN above) always wins.
+if [ -f /data/config.toml ] && [ -z "$CLOUDFLARE_DOMAIN" ]; then
+  if [ -f /etc/pubky-cloudflare/testdrive.env ]; then
+    PREVIEW_URL=""
+    for i in $(seq 1 30); do
+      # tail -1: the logfile appends across container restarts; the last
+      # non-API trycloudflare URL is the current one.
+      PREVIEW_URL=$(grep -oE 'https://[a-z0-9-]+\.trycloudflare\.com' /etc/pubky-cloudflare/preview/quick.log 2>/dev/null | grep -v '^https://api\.' | tail -1)
+      [ -n "$PREVIEW_URL" ] && break
+      sleep 1
+    done
+    if [ -n "$PREVIEW_URL" ]; then
+      PREVIEW_DOMAIN="${PREVIEW_URL#https://}"
+      echo "Preview mode: publishing $PREVIEW_DOMAIN as icann_domain"
+      sed -i "s|^icann_domain = .*|icann_domain = \"$PREVIEW_DOMAIN\"|" /data/config.toml
+      if ! grep -q '^public_icann_http_port = ' /data/config.toml; then
+        sed -i "/^icann_domain = /a public_icann_http_port = 443" /data/config.toml
+      else
+        sed -i 's/^public_icann_http_port = .*/public_icann_http_port = 443/' /data/config.toml
+      fi
+      chown homeserver:homeserver /data/config.toml 2>/dev/null || true
+    else
+      echo "WARNING: preview mode enabled but no quick-tunnel URL appeared within 30s; leaving icann_domain unchanged" >&2
+    fi
+  elif grep -q '^icann_domain = ".*\.trycloudflare\.com"' /data/config.toml; then
+    # Preview was disabled: reset the stale random domain so the published
+    # record stops pointing at a dead URL.
+    echo "Preview mode disabled: resetting stale trycloudflare icann_domain to localhost"
+    sed -i 's|^icann_domain = .*|icann_domain = "localhost"|' /data/config.toml
+    sed -i '/^public_icann_http_port = /d' /data/config.toml
+    chown homeserver:homeserver /data/config.toml 2>/dev/null || true
+  fi
+fi
+
 # Optimize chown: only run if ownership change is needed
 # Check if /data is owned by homeserver user
 if [ "$(stat -c '%U:%G' /data 2>/dev/null || stat -f '%Su:%Sg' /data 2>/dev/null)" != "homeserver:homeserver" ]; then
