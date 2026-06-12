@@ -274,6 +274,14 @@ if [ -d "$CF_DIR" ]; then
   # the dashboard (nextjs 1001) reads it back. Nothing secret lives here -
   # the only content is the tunnel's own log with its public URL.
   chmod 777 "$PREVIEW_DIR" 2>/dev/null || true
+  # Heal a mis-owned logfile too: cloudflared-preview re-opens quick.log by
+  # name on every restart, and a file some other actor chowned away from
+  # 65532 fails that open, so the URL never lands and the publish wait below
+  # times out. 664: cloudflared writes as owner, the dashboard reads.
+  if [ -f "$PREVIEW_DIR/quick.log" ]; then
+    chown 65532:65532 "$PREVIEW_DIR/quick.log" 2>/dev/null || true
+    chmod 664 "$PREVIEW_DIR/quick.log" 2>/dev/null || true
+  fi
 fi
 
 # Preview mode (dashboard "Preview" feature): a Cloudflare Quick Tunnel whose

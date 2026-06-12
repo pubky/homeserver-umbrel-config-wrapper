@@ -369,6 +369,29 @@ assert_not "no port 443 injected" grep -q '^public_icann_http_port = ' "$CONFIG"
 assert "boot stamp written on not-publishing path" test -s "$DATA/.wrapper-boot-stamp"
 finish "ungated domain not published"
 
+echo "Scenario 17: preview prep heals a mis-owned quick.log"
+new_env s17
+cat > "$CONFIG" <<'EOF'
+[pkdns]
+icann_domain = "localhost"
+EOF
+touch "$CF/testdrive.env"
+mkdir -p "$CF/preview"
+printf 'noise\n' > "$CF/preview/quick.log"
+# Simulate the poisoned state: wrong mode always, wrong owner only when the
+# harness itself runs as root (chown needs it); best-effort like the
+# script's own ownership ops.
+chown 0:0 "$CF/preview/quick.log" 2>/dev/null || true
+chmod 600 "$CF/preview/quick.log"
+run_entry
+assert "exit 0" test "$RC" -eq 0
+assert "quick.log still present" test -f "$CF/preview/quick.log"
+assert "quick.log mode healed to 664" test "$(stat -c '%a' "$CF/preview/quick.log" 2>/dev/null)" = "664"
+if [ "$(id -u)" = "0" ]; then
+  assert "quick.log owner healed to 65532" test "$(stat -c '%u' "$CF/preview/quick.log" 2>/dev/null)" = "65532"
+fi
+finish "preview quick.log heal"
+
 echo ""
 echo "==== Summary ====$SUMMARY"
 echo ""
