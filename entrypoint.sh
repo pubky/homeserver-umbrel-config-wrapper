@@ -77,6 +77,16 @@ if [ -f /data/config.toml ] && [ -n "$CLOUDFLARE_DOMAIN" ]; then
   chown homeserver:homeserver /data/config.toml 2>/dev/null || true
 fi
 
+# Preview mode prerequisite: the cloudflared-preview container (distroless,
+# UID 65532) must be able to create its logfile in the preview dir. This
+# wrapper runs as root at every app start, before the homeserver, so it owns
+# that preparation (the dashboard's entrypoint runs too late on first boot).
+if [ -d /etc/pubky-cloudflare ]; then
+  mkdir -p /etc/pubky-cloudflare/preview 2>/dev/null || true
+  chown 65532:65532 /etc/pubky-cloudflare/preview 2>/dev/null || true
+  chmod 770 /etc/pubky-cloudflare/preview 2>/dev/null || true
+fi
+
 # Preview mode (dashboard "Preview" feature): a Cloudflare Quick Tunnel whose
 # random *.trycloudflare.com URL is published as the homeserver's domain.
 # The cloudflared-preview compose service (gated on the same testdrive.env
