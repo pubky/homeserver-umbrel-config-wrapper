@@ -84,7 +84,10 @@ fi
 if [ -d /etc/pubky-cloudflare ]; then
   mkdir -p /etc/pubky-cloudflare/preview 2>/dev/null || true
   chown 65532:65532 /etc/pubky-cloudflare/preview 2>/dev/null || true
-  chmod 770 /etc/pubky-cloudflare/preview 2>/dev/null || true
+  # 777, not 770: the cloudflared-preview container (65532) writes the log,
+  # the dashboard (nextjs 1001) reads it back. Nothing secret lives here -
+  # the only content is the tunnel's own log with its public URL.
+  chmod 777 /etc/pubky-cloudflare/preview 2>/dev/null || true
 fi
 
 # Preview mode (dashboard "Preview" feature): a Cloudflare Quick Tunnel whose
