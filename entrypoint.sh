@@ -96,9 +96,20 @@ migrate_config() {
 mkdir -p "$DATA_DIR"
 
 # Cloudflare Tunnel: read domain from dashboard-written file if present (overrides env)
+# Publish gate: a domain only counts as a working permanent setup when a
+# tunnel mode is configured alongside it, matching the dashboard's
+# definition: domain AND (non-empty token OR config.yml present). The
+# dashboard rejects domain-only saves nowadays, so the bare-domain branch
+# only fires for stale or hand-edited state dirs; it falls through to the
+# preview path or the localhost reset as usual.
 if [ -f "$CF_DIR/domain" ] && [ -s "$CF_DIR/domain" ]; then
-  CLOUDFLARE_DOMAIN=$(tr -d '\n\r' < "$CF_DIR/domain")
-  export CLOUDFLARE_DOMAIN
+  if [ -s "$CF_DIR/token" ] || [ -f "$CF_DIR/config.yml" ]; then
+    CLOUDFLARE_DOMAIN=$(tr -d '\n\r' < "$CF_DIR/domain")
+    export CLOUDFLARE_DOMAIN
+  else
+    echo "WARNING: domain configured but no tunnel mode is set up (no token, no config.yml); not publishing" >&2
+    CLOUDFLARE_DOMAIN=""
+  fi
 fi
 
 # Domain safety: the value is interpolated into sed expressions and TOML
@@ -333,3 +344,15 @@ if [ "$(stat -c '%U:%G' "$DATA_DIR" 2>/dev/null || stat -f '%Su:%Sg' "$DATA_DIR"
   # Only chown if ownership is different
   chown -R homeserver:homeserver "$DATA_DIR" 2>/dev/null || true
 fi
+
+# Boot stamp: epoch of this wrapper run's successful completion, written
+# last so its presence implies all config.toml patching above is done. The
+# wrapper runs exactly once per app boot, immediately before the homeserver
+# starts, so this timestamp is the best available proxy for "what the
+# running homeserver last read". Contract: the dashboard (which mounts
+# $DATA_DIR) compares cloudflare state-file mtimes against this stamp to
+# derive a durable "restart pending" signal.
+date +%s > "$DATA_DIR/.wrapper-boot-stamp.tmp"
+chmod 644 "$DATA_DIR/.wrapper-boot-stamp.tmp" 2>/dev/null || true
+chown homeserver:homeserver "$DATA_DIR/.wrapper-boot-stamp.tmp" 2>/dev/null || true
+mv "$DATA_DIR/.wrapper-boot-stamp.tmp" "$DATA_DIR/.wrapper-boot-stamp"

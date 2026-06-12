@@ -138,7 +138,7 @@ assert "admin section rendered" grep -q '^admin_password = "adminsecret"' "$CONF
 assert "no leftover .tmp" test ! -e "$CONFIG.tmp"
 finish "interrupted render heals"
 
-echo "Scenario 4: domain file publishes icann_domain + port 443 (+ public_ip heal)"
+echo "Scenario 4: domain + token publishes icann_domain + port 443 (+ public_ip heal)"
 new_env s4
 cat > "$CONFIG" <<'EOF'
 [pkdns]
@@ -147,6 +147,7 @@ icann_domain = "localhost"
 user_keys_republisher_interval = 14400
 EOF
 printf 'example.com\n' > "$CF/domain"
+printf 'eyJhIjoiYiJ9\n' > "$CF/token"
 run_entry
 assert "exit 0" test "$RC" -eq 0
 assert "icann_domain updated" grep -q '^icann_domain = "example.com"' "$CONFIG"
@@ -162,6 +163,7 @@ cat > "$CONFIG" <<'EOF'
 icann_domain = "localhost"
 EOF
 printf 'bad domain|x\n' > "$CF/domain"
+printf 'eyJhIjoiYiJ9\n' > "$CF/token"
 run_entry
 assert "exit 0" test "$RC" -eq 0
 assert "warning emitted" grep -q 'characters outside' "$ENVDIR/stderr.log"
@@ -222,6 +224,7 @@ icann_domain = "old-preview.trycloudflare.com"
 public_icann_http_port = 443
 EOF
 printf 'example.org\n' > "$CF/domain"
+printf 'eyJhIjoiYiJ9\n' > "$CF/token"
 touch "$CF/testdrive.env"
 mkdir -p "$CF/preview"
 printf 'noise\n' > "$CF/preview/quick.log"
@@ -295,6 +298,7 @@ cat > "$CONFIG" <<'EOF'
 icann_domain   =   "localhost"
 EOF
 printf 'space.example.com\n' > "$CF/domain"
+printf 'eyJhIjoiYiJ9\n' > "$CF/token"
 run_entry
 assert "exit 0" test "$RC" -eq 0
 assert "icann_domain patched despite extra whitespace" grep -q '^icann_domain = "space.example.com"' "$CONFIG"
@@ -316,6 +320,54 @@ assert "first kept active" grep -q '^icann_domain = "first.example.com"' "$CONFI
 assert "second commented" grep -q '^# icann_domain = "second.example.com"' "$CONFIG"
 assert "exactly one active icann_domain" test "$(grep -c '^icann_domain' "$CONFIG")" -eq 1
 finish "duplicate icann_domain dedupe"
+
+echo "Scenario 14: successful run writes a fresh boot stamp"
+new_env s14
+T0=$(date +%s)
+run_entry
+T1=$(date +%s)
+assert "exit 0" test "$RC" -eq 0
+assert "boot stamp exists non-empty" test -s "$DATA/.wrapper-boot-stamp"
+STAMP=$(tr -d '\n' < "$DATA/.wrapper-boot-stamp" 2>/dev/null || echo "")
+case "$STAMP" in
+  ''|*[!0-9]*) STAMP=0 ;;
+esac
+assert "stamp not older than run start" test "$STAMP" -ge "$T0"
+assert "stamp not in the future" test "$STAMP" -le "$T1"
+assert "no leftover stamp .tmp" test ! -e "$DATA/.wrapper-boot-stamp.tmp"
+finish "boot stamp on success"
+
+echo "Scenario 15: domain + config.yml (no token) publishes"
+new_env s15
+cat > "$CONFIG" <<'EOF'
+[pkdns]
+icann_domain = "localhost"
+EOF
+printf 'byo.example.com\n' > "$CF/domain"
+printf 'tunnel: abc\n' > "$CF/config.yml"
+run_entry
+assert "exit 0" test "$RC" -eq 0
+assert "icann_domain published" grep -q '^icann_domain = "byo.example.com"' "$CONFIG"
+assert "port 443 added" grep -q '^public_icann_http_port = 443' "$CONFIG"
+finish "domain + config.yml publishes"
+
+echo "Scenario 16: domain with no tunnel mode does not publish, stamp still written"
+new_env s16
+cat > "$CONFIG" <<'EOF'
+[pkdns]
+icann_domain = "localhost"
+EOF
+printf 'orphan.example.com\n' > "$CF/domain"
+touch "$CF/token" # zero-byte token does not count as a tunnel mode
+run_entry
+assert "exit 0" test "$RC" -eq 0
+assert "warning emitted" grep -q 'domain configured but no tunnel mode is set up' "$ENVDIR/stderr.log"
+assert "warning says not publishing" grep -q 'not publishing' "$ENVDIR/stderr.log"
+assert "icann_domain stays localhost" grep -q '^icann_domain = "localhost"' "$CONFIG"
+assert_not "domain not published" grep -q 'orphan.example.com' "$CONFIG"
+assert_not "no port 443 injected" grep -q '^public_icann_http_port = ' "$CONFIG"
+assert "boot stamp written on not-publishing path" test -s "$DATA/.wrapper-boot-stamp"
+finish "ungated domain not published"
 
 echo ""
 echo "==== Summary ====$SUMMARY"
