@@ -32,7 +32,7 @@ iso_to_epoch() {
 
 # Print the newest quick-tunnel URL in the logfile ($1) whose log line is
 # recent enough to belong to this boot: timestamp >= WRAPPER_START - 15s
-# (grace because cloudflared-preview has no depends_on ordering and can win
+# (grace because the tunnel service has no depends_on ordering and can win
 # the start race, logging its fresh URL before this script's first instant).
 # cloudflared's --logfile lines are JSON with a "time" field; a leading bare
 # timestamp (console format) is handled too. Lines whose timestamp cannot be
@@ -268,18 +268,18 @@ if [ -n "$CLOUDFLARE_DOMAIN" ] && [ -f "$CF_DIR/testdrive.env" ]; then
   rm -f "$CF_DIR/testdrive.env"
 fi
 
-# Preview mode prerequisite: the cloudflared-preview container (distroless,
+# Preview mode prerequisite: the tunnel service (tunnel.sh,
 # UID 65532) must be able to create its logfile in the preview dir. This
 # wrapper runs as root at every app start, before the homeserver, so it owns
 # that preparation (the dashboard's entrypoint runs too late on first boot).
 if [ -d "$CF_DIR" ]; then
   mkdir -p "$PREVIEW_DIR" 2>/dev/null || true
   chown 65532:65532 "$PREVIEW_DIR" 2>/dev/null || true
-  # 777, not 770: the cloudflared-preview container (65532) writes the log,
+  # 777, not 770: the tunnel service (65532) writes the log,
   # the dashboard (nextjs 1001) reads it back. Nothing secret lives here -
   # the only content is the tunnel's own log with its public URL.
   chmod 777 "$PREVIEW_DIR" 2>/dev/null || true
-  # Heal a mis-owned logfile too: cloudflared-preview re-opens quick.log by
+  # Heal a mis-owned logfile too: cloudflared re-opens quick.log by
   # name on every restart, and a file some other actor chowned away from
   # 65532 fails that open, so the URL never lands and the publish wait below
   # times out. 664: cloudflared writes as owner, the dashboard reads.
@@ -291,8 +291,8 @@ fi
 
 # Preview mode (dashboard "Preview" feature): a Cloudflare Quick Tunnel whose
 # random *.trycloudflare.com URL is published as the homeserver's domain.
-# The cloudflared-preview compose service (gated on the same testdrive.env
-# file via env_file) writes its log to preview/quick.log; the assigned URL
+# The tunnel service (tunnel.sh, which picks Preview mode from the same
+# testdrive.env file) writes its log to preview/quick.log; the assigned URL
 # appears there within ~10s. Each app restart yields a NEW random URL, so
 # this runs on every start. Acceptance is by log line timestamp (see
 # newest_fresh_url above), not by file offset: the logfile appends across
