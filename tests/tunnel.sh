@@ -29,7 +29,7 @@ check "config.yml runs the persistent tunnel" "args=tunnel --no-autoupdate --con
 new_dir preview
 echo "TUNNEL_URL=http://homeserver:6286" > "$DIR/testdrive.env"
 run
-check "testdrive.env runs a quick tunnel" "args=tunnel --no-autoupdate --logfile $DIR/preview/quick.log url=http://homeserver:6286" "$CALLED"
+check "testdrive.env runs a quick tunnel" "args=tunnel --no-autoupdate --protocol http2 --logfile $DIR/preview/quick.log url=http://homeserver:6286" "$CALLED"
 
 new_dir both
 : > "$DIR/config.yml"
