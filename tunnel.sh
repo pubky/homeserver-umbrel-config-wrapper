@@ -23,7 +23,9 @@ if [ ! -f "$DIR/config.yml" ] && [ -f "$DIR/testdrive.env" ]; then
   if [ -n "$TUNNEL_URL" ]; then
     export TUNNEL_URL
     echo "Preview mode: starting a quick tunnel to $TUNNEL_URL"
-    exec cloudflared tunnel --no-autoupdate --logfile "$DIR/preview/quick.log"
+    # Quick tunnels start on QUIC and never fall back, so a network that blocks
+    # UDP 7844 leaves the published address dead. http2 runs over TCP.
+    exec cloudflared tunnel --no-autoupdate --protocol http2 --logfile "$DIR/preview/quick.log"
   fi
 fi
 
