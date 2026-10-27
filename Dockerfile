@@ -6,7 +6,7 @@ RUN addgroup -S homeserver && adduser -S homeserver -G homeserver
 # The official cloudflared binary, for the app's tunnel service (tunnel.sh).
 # Copied unmodified from the upstream image at a pinned digest (multi-arch
 # index, amd64 + arm64); it is a static binary and runs on alpine as is.
-COPY --from=cloudflare/cloudflared:2026.5.2@sha256:12ff5c6992a9863db4da270746af7c244bcaee49353039af8104268a18d6c4f0 /usr/local/bin/cloudflared /usr/local/bin/cloudflared
+COPY --from=cloudflare/cloudflared:2026.10.3@sha256:faa8e0a1475f137c910be6025f43c8e4092fdd35461b31e19fd1390657a1ff39 /usr/local/bin/cloudflared /usr/local/bin/cloudflared
 
 COPY entrypoint.sh /usr/local/bin/entrypoint.sh
 COPY tunnel.sh /usr/local/bin/tunnel.sh
